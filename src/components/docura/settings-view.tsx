@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import {
-  Palette, Type, Building2, Settings2, Shield, Accessibility, Info, Save, RotateCcw, Search,
+  Palette, Type, Building2, Settings2, Shield, Accessibility, Info, Save, RotateCcw, Search, Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import { ConversionDefaultsPanel } from "./settings/conversion-defaults-panel";
 import { PrivacySettingsPanel } from "./settings/privacy-settings-panel";
 import { AccessibilitySettingsPanel } from "./settings/accessibility-settings-panel";
 import { AboutPanel } from "./settings/about-panel";
+import { DownloadPanel } from "./settings/download-panel";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,7 @@ const TABS = [
   { id: "conversion", label: "Conversion Defaults", icon: Settings2 },
   { id: "privacy", label: "Privacy", icon: Shield },
   { id: "accessibility", label: "Accessibility", icon: Accessibility },
+  { id: "download", label: "Download App", icon: Download },
   { id: "about", label: "About", icon: Info },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -126,6 +128,7 @@ export function SettingsView() {
             {active === "conversion" && <ConversionDefaultsPanel />}
             {active === "privacy" && <PrivacySettingsPanel />}
             {active === "accessibility" && <AccessibilitySettingsPanel />}
+            {active === "download" && <DownloadPanel />}
             {active === "about" && <AboutPanel />}
 
             <div className="flex items-center justify-end gap-2 pt-6 mt-6 border-t border-border/40">
