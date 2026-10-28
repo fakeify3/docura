@@ -1,0 +1,72 @@
+DOCURA Desktop Build Instructions
+================================
+
+DOCURA ships as a Tauri application wrapping the same React UI as the web
+version. The desktop build invokes LibreOffice locally — no documents ever
+leave the user's machine.
+
+Why this approach
+-----------------
+- Same UI / UX as the web app (no duplication).
+- Real DOCX -> PDF conversion via LibreOffice 25.x headless.
+- Native window, native file dialogs, native save-as.
+- Fully offline once installed (no server calls).
+
+Prerequisites (Windows 10/11 64-bit)
+------------------------------------
+1. Node.js 20 LTS  (https://nodejs.org/)
+2. Rust toolchain  (https://rustup.rs/)
+3. Microsoft C++ Build Tools  (Visual Studio Build Tools 2022)
+4. LibreOffice 25.x  (https://www.libreoffice.org/) — or use a bundled
+   portable runtime placed next to the executable.
+5. Tauri CLI 2.x  (installed via bun as a dev dependency)
+
+Project layout
+--------------
+docura/
+  src/                     <- React UI (shared with web app)
+  src-tauri/               <- Rust + tauri.conf.json
+  src-tauri/src/lib.rs     <- conversion entrypoint (invokes soffice)
+  src-tauri/tauri.conf.json <- app metadata, window config, bundle settings
+
+Build steps
+-----------
+1. Install dependencies:
+     bun install
+
+2. Run in development (hot reload for both web UI and Rust backend):
+     bun tauri dev
+
+3. Build a Windows MSI installer:
+     bun tauri build
+
+4. The installer is produced at:
+     src-tauri/target/release/bundle/msi/DOCURA_1.0.0_x64_en-US.msi
+
+5. Run the installer; DOCURA will appear in the Start menu.
+
+Bundling LibreOffice
+--------------------
+For a fully self-contained installer, ship a portable LibreOffice runtime
+profile alongside the executable. Configure `tauri.conf.json` -> `bundle`
+-> `resources` to include:
+  - portable-soffice/bin/soffice.exe
+  - portable-soffice/share/extensions
+  - portable-soffice/user  (writable profile)
+
+Then point DOCURA's conversion wrapper at the bundled soffice path.
+
+Limitations
+-----------
+- This source package does NOT include a pre-built installer. You must run
+  the build yourself following the steps above.
+- macOS and Linux builds share the same source project but require
+  platform-specific toolchains and are not yet officially released.
+
+Verification
+------------
+After building:
+  1. Launch DOCURA.
+  2. Convert a real DOCX file (e.g. /tests/sample.docx).
+  3. Confirm the resulting PDF opens in Adobe Acrobat / SumatraPDF.
+  4. Confirm a corrupted DOCX produces a clear error, not a fake PDF.

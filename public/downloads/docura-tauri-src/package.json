@@ -1,0 +1,20 @@
+{
+  "name": "docura",
+  "version": "1.0.0",
+  "description": "DOCURA Desktop — premium DOCX to PDF converter",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 1420",
+    "build": "next build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5"
+  }
+}

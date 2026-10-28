@@ -1,0 +1,340 @@
+/**
+ * DOCURA — Server-side DOCX → PDF conversion engine
+ *
+ * Real conversion via LibreOffice headless (`soffice --headless --convert-to pdf`).
+ * This is a genuine document conversion engine — not a file rename, not a screenshot,
+ * not a text-only dump.
+ *
+ * Security model:
+ *  - Files are validated by magic bytes (PK\x03\x04 for DOCX/zip)
+ *  - Each conversion uses a unique temp working directory with random name
+ *  - Input filenames are sanitized (basename only) to prevent path traversal
+ *  - Output is verified by reading the PDF magic header (%PDF-) and parsing page count
+ *  - Temp directories are cleaned up after each conversion
+ *  - LibreOffice runs with an isolated -env:UserInstallation profile to avoid
+ *    collisions and to prevent leakage between concurrent conversions
+ */
+
+import { randomUUID } from "crypto";
+import { promises as fs } from "fs";
+import { spawn } from "child_process";
+import { tmpdir } from "os";
+import { join, basename, extname, resolve } from "path";
+
+const SOFFICE_BIN =
+  process.env.SOFFICE_BIN || "soffice";
+
+export interface ConversionResult {
+  ok: boolean;
+  outputBuffer?: Buffer;
+  outputName: string;
+  durationMs: number;
+  inputSize: number;
+  outputSize: number;
+  pages: number | null;
+  errorMessage?: string;
+  errorKind?:
+    | "invalid_format"
+    | "corrupted"
+    | "encrypted"
+    | "oversized"
+    | "engine_unavailable"
+    | "timeout"
+    | "disk_full"
+    | "unknown";
+}
+
+const MAX_FILE_BYTES = parseInt(
+  process.env.DOCURA_MAX_FILE_BYTES || String(100 * 1024 * 1024),
+  10
+);
+
+const CONVERSION_TIMEOUT_MS = parseInt(
+  process.env.DOCURA_TIMEOUT_MS || String(120_000),
+  10
+);
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Validate that an uploaded buffer is genuinely a DOCX file.
+ * DOCX is a ZIP archive whose first bytes are the ZIP local-file-header
+ * magic (PK\x03\x04). We then verify [Content_Types].xml is in the central
+ * directory to ensure it's actually an Office Open XML document, not just a
+ * random zip.
+ */
+export function validateDocx(buffer: Buffer): {
+  ok: boolean;
+  reason?: string;
+  kind?: ConversionResult["errorKind"];
+} {
+  if (!buffer || buffer.length < 4) {
+    return { ok: false, reason: "File is empty or too small to be valid.", kind: "invalid_format" };
+  }
+  // ZIP magic
+  if (buffer[0] !== 0x50 || buffer[1] !== 0x4b || buffer[2] !== 0x03 || buffer[3] !== 0x04) {
+    return { ok: false, reason: "Not a valid DOCX file (missing ZIP header).", kind: "invalid_format" };
+  }
+  // Look for the Office Open XML signature inside the file — the content-types
+  // file is always present in a valid DOCX. We just look for its name as a
+  // substring; that's enough to distinguish from arbitrary zips.
+  const needle = Buffer.from("[Content_Types].xml", "utf-8");
+  if (buffer.indexOf(needle) === -1) {
+    return { ok: false, reason: "Not a valid DOCX (missing Office Open XML manifest).", kind: "invalid_format" };
+  }
+  return { ok: true };
+}
+
+export function sanitizeFilename(name: string): string {
+  // strip path components — basename only
+  const stripped = basename(name);
+  // remove any null bytes & control chars
+  const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!cleaned) return "document.docx";
+  // ensure extension is .docx
+  const ext = extname(cleaned).toLowerCase();
+  if (ext !== ".docx") {
+    return cleaned + ".docx";
+  }
+  return cleaned;
+}
+
+export function makeUniqueTempDir(): string {
+  const dir = join(tmpdir(), `docura-${randomUUID()}`);
+  return dir;
+}
+
+/* ------------------------------------------------------------------ */
+/* PDF post-check                                                     */
+/* ------------------------------------------------------------------ */
+
+export interface PdfInfo {
+  valid: boolean;
+  pages: number | null;
+}
+
+/**
+ * Validate the produced PDF by:
+ *  1. Checking the magic header starts with `%PDF-`
+ *  2. Counting `/Type /Page` occurrences (a reasonable page-count heuristic
+ *     that does not require a full PDF parser). Returns null if it cannot
+ *     be determined.
+ */
+export function inspectPdf(buffer: Buffer): PdfInfo {
+  if (!buffer || buffer.length < 5) return { valid: false, pages: null };
+  const header = buffer.slice(0, 5).toString("latin1");
+  if (header !== "%PDF-") return { valid: false, pages: null };
+  // Count occurrences of /Type /Page (not /Pages). This is best-effort; many
+  // producers write /Type/Page without a space too, so we accept both.
+  const text = buffer.toString("latin1");
+  const re = /\/Type\s*\/Page(?!s)\b/g;
+  let count = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) count++;
+  return { valid: true, pages: count > 0 ? count : null };
+}
+
+/* ------------------------------------------------------------------ */
+/* The actual conversion                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Convert a DOCX buffer to a real PDF buffer using LibreOffice headless.
+ *
+ * The buffer is written to a unique temp directory, soffice is invoked with
+ * an isolated user profile, the resulting PDF is read back, validated, and
+ * the temp directory is removed.
+ */
+export async function convertDocxToPdf(
+  inputBuffer: Buffer,
+  inputName: string,
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (stage: "validating" | "preparing" | "converting" | "verifying" | "done" | "failed") => void;
+  }
+): Promise<ConversionResult> {
+  const start = Date.now();
+  const onProgress = opts?.onProgress ?? (() => {});
+
+  onProgress("validating");
+  const validation = validateDocx(inputBuffer);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      outputName: "",
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: 0,
+      pages: null,
+      errorMessage: validation.reason,
+      errorKind: validation.kind,
+    };
+  }
+
+  if (inputBuffer.length > MAX_FILE_BYTES) {
+    return {
+      ok: false,
+      outputName: "",
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: 0,
+      pages: null,
+      errorMessage: `File exceeds the maximum allowed size (${Math.floor(MAX_FILE_BYTES / 1024 / 1024)} MB).`,
+      errorKind: "oversized",
+    };
+  }
+
+  const safeName = sanitizeFilename(inputName);
+  const workDir = makeUniqueTempDir();
+  const profileDir = makeUniqueTempDir();
+  const inputPath = join(workDir, safeName);
+
+  try {
+    onProgress("preparing");
+    await fs.mkdir(workDir, { recursive: true });
+    await fs.mkdir(profileDir, { recursive: true });
+    await fs.writeFile(inputPath, inputBuffer);
+
+    onProgress("converting");
+    // Run LibreOffice headless. The -env:UserInstallation flag isolates the
+    // profile to prevent collisions between concurrent conversions.
+    await new Promise<void>((resolveP, rejectP) => {
+      const args = [
+        "--headless",
+        "--norestore",
+        "--nolockcheck",
+        "--nodefault",
+        "--nofirststartwizard",
+        `-env:UserInstallation=file://${profileDir}`,
+        "--convert-to",
+        "pdf:writer_pdf_Export",
+        "--outdir",
+        workDir,
+        inputPath,
+      ];
+      const child = spawn(SOFFICE_BIN, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, HOME: profileDir },
+      });
+
+      let stderr = "";
+      child.stdout?.on("data", () => {});
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+        rejectP(new Error("Conversion timed out."));
+      }, CONVERSION_TIMEOUT_MS);
+
+      const onAbort = () => {
+        try { child.kill("SIGKILL"); } catch {}
+        rejectP(new Error("Conversion cancelled."));
+      };
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        // engine missing
+        rejectP(Object.assign(new Error(`LibreOffice engine unavailable: ${err.message}`), { kind: "engine_unavailable" }));
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        if (code === 0) resolveP();
+        else {
+          // Detect encrypted doc
+          if (/encrypted|password/i.test(stderr)) {
+            rejectP(Object.assign(new Error("Document is encrypted or password-protected."), { kind: "encrypted" }));
+          } else if (/no such file|not found/i.test(stderr)) {
+            rejectP(Object.assign(new Error("Conversion engine not installed."), { kind: "engine_unavailable" }));
+          } else {
+            rejectP(Object.assign(new Error(`Conversion failed (exit ${code}): ${stderr.slice(0, 400)}`), { kind: "unknown" }));
+          }
+        }
+      });
+    });
+
+    onProgress("verifying");
+    const outName = safeName.replace(/\.docx$/i, ".pdf");
+    const outPath = join(workDir, outName);
+    const outBuffer = await fs.readFile(outPath);
+    const info = inspectPdf(outBuffer);
+    if (!info.valid) {
+      return {
+        ok: false,
+        outputName: outName,
+        durationMs: Date.now() - start,
+        inputSize: inputBuffer.length,
+        outputSize: outBuffer.length,
+        pages: null,
+        errorMessage: "Conversion produced an invalid PDF file.",
+        errorKind: "unknown",
+      };
+    }
+
+    onProgress("done");
+    return {
+      ok: true,
+      outputBuffer: outBuffer,
+      outputName: outName,
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: outBuffer.length,
+      pages: info.pages,
+    };
+  } catch (err: unknown) {
+    onProgress("failed");
+    const e = err as Error & { kind?: ConversionResult["errorKind"] };
+    const kind = e.kind ?? "unknown";
+    return {
+      ok: false,
+      outputName: "",
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: 0,
+      pages: null,
+      errorMessage: e.message || "Unknown conversion error.",
+      errorKind: kind,
+    };
+  } finally {
+    // always clean up
+    try { await fs.rm(workDir, { recursive: true, force: true }); } catch {}
+    try { await fs.rm(profileDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Health check                                                       */
+/* ------------------------------------------------------------------ */
+
+let cachedEngineStatus: { available: boolean; version: string | null; checkedAt: number } | null = null;
+const ENGINE_CHECK_TTL = 30_000;
+
+export async function checkEngine(): Promise<{ available: boolean; version: string | null }> {
+  const now = Date.now();
+  if (cachedEngineStatus && now - cachedEngineStatus.checkedAt < ENGINE_CHECK_TTL) {
+    return { available: cachedEngineStatus.available, version: cachedEngineStatus.version };
+  }
+  try {
+    const version = await new Promise<string>((resolveP, rejectP) => {
+      const child = spawn(SOFFICE_BIN, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      child.stdout?.on("data", (c: Buffer) => (out += c.toString()));
+      child.on("error", rejectP);
+      child.on("close", (code) => {
+        if (code === 0) resolveP(out.trim());
+        else rejectP(new Error(`exit ${code}`));
+      });
+    });
+    cachedEngineStatus = { available: true, version, checkedAt: now };
+    return { available: true, version };
+  } catch {
+    cachedEngineStatus = { available: false, version: null, checkedAt: now };
+    return { available: false, version: null };
+  }
+}
