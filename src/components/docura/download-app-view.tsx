@@ -19,14 +19,41 @@ export function DownloadAppView() {
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-10 py-8 sm:py-12">
         {/* Hero */}
         <div className="text-center max-w-2xl mx-auto mb-10">
-          <Badge variant="outline" className="text-[11px] py-1 px-2 mb-3">Version {APP_BUILD_INFO.version}</Badge>
+          <Badge variant="outline" className="text-[11px] py-1 px-2 mb-3 border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+            Version {APP_BUILD_INFO.version} · No install required
+          </Badge>
           <h2 className="text-3xl sm:text-4xl font-semibold tracking-tight leading-tight mb-3">
-            Take DOCURA anywhere.
+            You don&apos;t need to download anything.
           </h2>
           <p className="text-[14px] text-muted-foreground leading-relaxed">
-            Install DOCURA on your devices for offline-capable conversion. The web app runs in any modern
-            browser. Desktop builds bundle the conversion engine for fully offline processing.
+            DOCURA runs entirely in your browser. <span className="text-foreground font-medium">Upload a .docx → Convert → Download the PDF.</span>{" "}
+            Nothing to install on your device. The options below are <span className="text-foreground font-medium">optional extras</span> for
+            users who want a desktop shortcut or offline access — they are <span className="text-foreground font-medium">not required</span> for conversion.
           </p>
+        </div>
+
+        {/* Big confirmation banner */}
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5 sm:p-6 mb-10 flex items-start gap-4">
+          <div className="size-10 rounded-xl bg-emerald-500/15 grid place-items-center shrink-0">
+            <CheckCircle2 className="size-5 text-emerald-600 dark:text-emerald-400" />
+          </div>
+          <div className="flex-1">
+            <div className="text-[14px] font-semibold mb-1">The web app is the converter — nothing else needed.</div>
+            <p className="text-[12.5px] text-muted-foreground leading-relaxed">
+              You can convert DOCX → PDF right now using just the web app on the Convert page. No software to install,
+              no plugins, no extensions, no sign-up. The optional downloads below are for power users who want a
+              native desktop window or fully offline conversion.
+            </p>
+            <Button size="sm" className="mt-3 h-8 gap-1.5 text-[12px]" onClick={() => window.location.hash = "#convert"}>
+              <Globe className="size-3.5" /> Go to Convert
+            </Button>
+          </div>
+        </div>
+
+        {/* Optional extras heading */}
+        <div className="mb-4">
+          <h3 className="text-[14px] font-semibold tracking-tight">Optional extras</h3>
+          <p className="text-[12px] text-muted-foreground mt-0.5">Completely optional — skip these if you just want to convert documents.</p>
         </div>
 
         {/* Install cards */}

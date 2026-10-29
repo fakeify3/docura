@@ -13,35 +13,50 @@ export function DownloadPanel() {
   const setSection = useNav((s) => s.setSection);
   return (
     <div className="space-y-6">
-      <SettingGroup title="Get DOCURA" icon={Download} description="Install the web app on your devices, or download the desktop project for fully offline conversion.">
+      {/* Prominent "no install needed" banner */}
+      <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5 flex items-start gap-3">
+        <div className="size-9 rounded-lg bg-emerald-500/15 grid place-items-center shrink-0">
+          <CheckCircle2 className="size-5 text-emerald-600 dark:text-emerald-400" />
+        </div>
+        <div>
+          <div className="text-[13.5px] font-semibold mb-0.5">You don&apos;t need to download anything to convert.</div>
+          <p className="text-[12px] text-muted-foreground leading-relaxed">
+            The web app on the Convert page does it all — upload a .docx, click Convert, download the PDF.
+            No software to install, no sign-up, no plugins. The downloads below are <span className="text-foreground font-medium">optional extras</span> for
+            users who want a desktop shortcut or fully offline conversion.
+          </p>
+        </div>
+      </div>
+
+      <SettingGroup title="Optional extras (not required for conversion)" icon={Download} description="For users who want a desktop shortcut, an app-like installation, or fully offline conversion. Skip if you just want to convert documents.">
         <SettingCard>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Web App */}
+            {/* Web App — already running, no install needed */}
             <DownloadTile
               icon={Globe}
               tone="emerald"
-              title="Web App"
-              badge="Available now"
-              description="Open DOCURA in any modern browser. No install required."
+              title="Web App — already running"
+              badge="No install needed"
+              description="This is the converter you're using right now. Upload → Convert → Download. That's it."
               actions={
-                <Button className="w-full h-9 gap-2 text-[12px]" onClick={() => window.location.reload()}>
-                  <Globe className="size-3.5" /> Open Web App
+                <Button className="w-full h-9 gap-2 text-[12px]" onClick={() => setSection("convert")}>
+                  <Globe className="size-3.5" /> Go to Convert
                 </Button>
               }
               extras={
                 <Button variant="outline" className="w-full h-8 gap-1.5 text-[11px]" onClick={() => toast.info("Install DOCURA", { description: "Browser menu → Install app / Add to Home screen." })}>
-                  <Download className="size-3" /> Install as PWA
+                  <Download className="size-3" /> Optionally install as PWA
                 </Button>
               }
             />
 
-            {/* Windows Desktop */}
+            {/* Windows Desktop — optional, for offline use */}
             <DownloadTile
               icon={Monitor}
               tone="indigo"
-              title="Windows Desktop"
-              badge="Source + build commands"
-              description="Tauri project that wraps the same React UI and invokes LibreOffice locally — no uploads."
+              title="Windows Desktop (optional)"
+              badge="For offline use only"
+              description="Only if you want a native Windows app that works offline. Not required for normal conversion."
               actions={
                 <a href="/downloads/docura-tauri-source.zip" download>
                   <Button className="w-full h-9 gap-2 text-[12px]">
@@ -63,19 +78,19 @@ export function DownloadPanel() {
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11.5px] text-muted-foreground">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
-              Web app is real, working, and installable as a PWA right now.
+              <span><span className="text-foreground font-medium">Required for conversion:</span> Nothing — just use the web app.</span>
             </div>
             <div className="flex items-center gap-2">
               <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
-              Windows source builds a real MSI via <code className="text-foreground text-[10.5px] px-1 py-0.5 rounded bg-muted">bun tauri build</code>.
+              <span><span className="text-foreground font-medium">Account:</span> Not required.</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+              <span><span className="text-foreground font-medium">Plugins / extensions:</span> None needed.</span>
             </div>
             <div className="flex items-center gap-2">
               <AlertTriangle className="size-3.5 text-amber-500 shrink-0" />
-              No pre-built Windows installer in this sandbox — run the build commands to produce one.
-            </div>
-            <div className="flex items-center gap-2">
-              <Apple className="size-3.5 shrink-0" />
-              macOS &amp; Linux share the same source project — coming later.
+              <span><span className="text-foreground font-medium">Desktop build:</span> Optional — only for offline use.</span>
             </div>
           </div>
         </SettingCard>

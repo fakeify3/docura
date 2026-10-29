@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState, DragEvent } from "react";
 import {
-  Upload, FileText, X, RefreshCw, Download, Play, Loader2, CheckCircle2, AlertTriangle, FileWarning, Files, Sparkles,
+  Upload, FileText, X, RefreshCw, Download, Play, Loader2, CheckCircle2, FileWarning, Files, Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -278,8 +278,8 @@ export function ConvertWorkspace() {
                 </Button>
               )}
               <p className="text-[10.5px] text-muted-foreground mt-3 text-center leading-snug">
-                Files are processed locally via {APP_DEFAULTS.engine}.<br />
-                Converted PDFs are not stored on the server.
+                Conversion runs on our server via {APP_DEFAULTS.engine}.<br />
+                Nothing to install — converted PDFs are not stored.
               </p>
             </div>
           </div>
@@ -316,9 +316,9 @@ function HeroDropzone({
     <div className="px-4 sm:px-6 lg:px-10 py-8 sm:py-12 max-w-6xl mx-auto w-full">
       {/* Hero copy */}
       <div className="text-center max-w-2xl mx-auto mb-8">
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border/60 bg-card/60 text-[11px] text-muted-foreground mb-4">
-          <Sparkles className="size-3 text-primary" />
-          Real LibreOffice conversion · Privacy-conscious
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 mb-4">
+          <CheckCircle2 className="size-3" />
+          No install · No download · Works in your browser
         </div>
         <h1 className="text-3xl sm:text-4xl lg:text-5xl font-semibold tracking-tight leading-[1.1] mb-3">
           Drop a Word document.<br />
@@ -327,8 +327,9 @@ function HeroDropzone({
           </span>
         </h1>
         <p className="text-[14px] sm:text-[15px] text-muted-foreground leading-relaxed">
-          DOCURA converts <code className="text-[12px] px-1.5 py-0.5 rounded bg-muted">.docx</code> documents to PDF using a genuine
-          conversion engine. Customize the page, images, and document metadata. Download a real, valid PDF in seconds.
+          DOCURA converts your <code className="text-[12px] px-1.5 py-0.5 rounded bg-muted">.docx</code> file to a real PDF
+          right here in the browser. <span className="text-foreground font-medium">Upload → Convert → Download.</span> Nothing
+          to install, nothing to download, no account required.
         </p>
       </div>
 
@@ -368,10 +369,10 @@ function HeroDropzone({
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
-            <Badge variant="outline" className="text-[10px] font-normal">.docx</Badge>
-            <Badge variant="outline" className="text-[10px] font-normal">A4 · Letter · Legal</Badge>
-            <Badge variant="outline" className="text-[10px] font-normal">PDF 1.7</Badge>
-            <Badge variant="outline" className="text-[10px] font-normal">Local processing</Badge>
+            <Badge variant="outline" className="text-[10px] font-normal">.docx input</Badge>
+            <Badge variant="outline" className="text-[10px] font-normal">Real PDF output</Badge>
+            <Badge variant="outline" className="text-[10px] font-normal border-emerald-500/30 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400">No install</Badge>
+            <Badge variant="outline" className="text-[10px] font-normal border-emerald-500/30 bg-emerald-500/5 text-emerald-600 dark:text-emerald-400">No signup</Badge>
           </div>
         </div>
       </div>
@@ -379,19 +380,19 @@ function HeroDropzone({
       {/* Feature cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-8">
         <FeatureCard
+          icon={CheckCircle2}
+          title="No install needed"
+          body="Upload your .docx, click Convert, download the PDF. Nothing to install or download on your device — the conversion runs on our server."
+        />
+        <FeatureCard
           icon={FileText}
           title="Real conversion"
-          body="Powered by LibreOffice 25.2 headless — your .docx is genuinely transformed into a valid PDF."
+          body="Powered by LibreOffice 25.2 headless — your .docx is genuinely transformed into a valid PDF, not renamed or screenshotted."
         />
         <FeatureCard
           icon={Sparkles}
-          title="Premium customization"
-          body="Choose page size, orientation, margins, image quality, and document metadata."
-        />
-        <FeatureCard
-          icon={AlertTriangle}
-          title="Honest about limits"
-          body="We don't fake progress or rename files. If something can't be converted, we tell you."
+          title="Premium & private"
+          body="Pick page size, orientation, margins, and metadata. Files are processed and deleted — no permanent storage."
         />
       </div>
     </div>
