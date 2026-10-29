@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface EngineStatus {
@@ -12,9 +12,9 @@ interface EngineStatus {
 }
 
 /**
- * Honest disclosure: shows the real status of the LibreOffice engine on
- * the server. The user always knows whether conversions will actually
- * succeed in this environment.
+ * Engine status badge — only shows when something is actually wrong.
+ * When conversion is working normally, this component renders nothing.
+ * Users never see "install LibreOffice" or any technical detail.
  */
 export function EngineBadge() {
   const [status, setStatus] = useState<EngineStatus | null>(null);
@@ -41,32 +41,21 @@ export function EngineBadge() {
     };
   }, []);
 
+  // Hide completely while loading OR when everything is working.
+  // The badge only appears if conversion is actually broken — and even then
+  // it just says "temporarily unavailable", never "install LibreOffice".
+  if (loading || status?.available) return null;
+
   return (
     <div
       className={cn(
         "hidden md:flex items-center gap-1.5 h-8 px-2.5 rounded-full border text-[11.5px] font-medium transition-colors",
-        loading && "border-border/60 bg-muted/40 text-muted-foreground",
-        !loading && status?.available && "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-        !loading && !status?.available && "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
       )}
-      title={
-        loading
-          ? "Checking conversion engine…"
-          : status?.available
-            ? `${status.engineName} ${status.version ?? ""}\nResolved path: ${status.path ?? "(unknown)"}`
-            : "Conversion engine unavailable. Conversions will fail until LibreOffice is installed and soffice is on the PATH."
-      }
+      title="Temporarily unavailable — please try again"
     >
-      {loading ? (
-        <Loader2 className="size-3.5 animate-spin" />
-      ) : status?.available ? (
-        <CheckCircle2 className="size-3.5" />
-      ) : (
-        <AlertTriangle className="size-3.5" />
-      )}
-      <span className="hidden lg:inline">
-        {loading ? "Checking" : status?.available ? "Engine ready" : "Engine unavailable"}
-      </span>
+      <AlertTriangle className="size-3.5" />
+      <span className="hidden lg:inline">Temporarily unavailable</span>
     </div>
   );
 }

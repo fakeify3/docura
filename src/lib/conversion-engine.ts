@@ -272,7 +272,9 @@ export async function convertDocxToPdf(
     };
   }
 
-  // Resolve the engine binary first — fail fast with a clear message if missing
+  // Resolve the engine binary first — fail with a FRIENDLY message if missing.
+  // The technical detail goes into `internalError` for server logs only;
+  // the user never sees "install LibreOffice" language.
   const sofficeBin = await resolveSofficeBin();
   if (!sofficeBin) {
     onProgress("failed");
@@ -283,8 +285,8 @@ export async function convertDocxToPdf(
       inputSize: inputBuffer.length,
       outputSize: 0,
       pages: null,
-      errorMessage:
-        "Conversion engine unavailable. LibreOffice (soffice) was not found on the PATH or in any of the well-known install locations. Install LibreOffice 25.x or set SOFFICE_BIN to point at the soffice executable.",
+      errorMessage: "Conversion failed. Please try again.",
+      internalError: "soffice binary not resolved via any candidate path.",
       errorKind: "engine_unavailable",
     };
   }
@@ -348,16 +350,17 @@ export async function convertDocxToPdf(
       child.on("error", (err) => {
         clearTimeout(timer);
         opts?.signal?.removeEventListener("abort", onAbort);
-        // ENOENT means the binary itself wasn't found
+        // ENOENT means the binary itself wasn't found — user sees a friendly
+        // message; the technical detail goes into internalError for logs.
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
           rejectP(Object.assign(
-            new Error(`LibreOffice engine not found at "${sofficeBin}". Install LibreOffice and ensure soffice is on the PATH, or set SOFFICE_BIN.`),
-            { kind: "engine_unavailable" }
+            new Error("Conversion failed. Please try again."),
+            { kind: "engine_unavailable", internalError: `ENOENT spawning soffice at ${sofficeBin}: ${err.message}` }
           ));
         } else {
           rejectP(Object.assign(
-            new Error(`Failed to launch LibreOffice: ${err.message}`),
-            { kind: "engine_unavailable" }
+            new Error("Conversion failed. Please try again."),
+            { kind: "engine_unavailable", internalError: `Failed to launch soffice: ${err.message}` }
           ));
         }
       });
@@ -370,15 +373,15 @@ export async function convertDocxToPdf(
         } else {
           // Detect encrypted doc
           if (/encrypted|password/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Document is encrypted or password-protected. Remove the password in Word first, then re-upload."), { kind: "encrypted" }));
+            rejectP(Object.assign(new Error("This document is password-protected. Please remove the password and try again."), { kind: "encrypted" }));
           } else if (/no such file|not found/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Conversion engine not found. Install LibreOffice and ensure soffice is on the PATH."), { kind: "engine_unavailable" }));
+            rejectP(Object.assign(new Error("Conversion failed. Please try again."), { kind: "engine_unavailable", internalError: `soffice stderr: ${stderr.slice(0, 300)}` }));
           } else if (/disk|space|enospc/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Insufficient disk space for conversion. Free up space and try again."), { kind: "disk_full" }));
+            rejectP(Object.assign(new Error("Conversion failed due to insufficient server space. Please try again later."), { kind: "disk_full" }));
           } else {
             rejectP(Object.assign(
-              new Error(`Conversion failed (exit ${code}). ${stderr.slice(0, 300) || stdout.slice(0, 300)}`.trim()),
-              { kind: "unknown" }
+              new Error("Conversion failed. Please try again."),
+              { kind: "unknown", internalError: `exit ${code}: ${(stderr || stdout).slice(0, 300)}` }
             ));
           }
         }
@@ -401,7 +404,8 @@ export async function convertDocxToPdf(
           inputSize: inputBuffer.length,
           outputSize: 0,
           pages: null,
-          errorMessage: "Conversion produced no output PDF. The source document may be corrupted or unsupported.",
+          errorMessage: "Conversion failed. Please try again.",
+          internalError: `Output PDF not produced at ${outPath}`,
           errorKind: "corrupted",
         };
       }
@@ -416,7 +420,8 @@ export async function convertDocxToPdf(
         inputSize: inputBuffer.length,
         outputSize: outBuffer.length,
         pages: null,
-        errorMessage: "Conversion produced an invalid PDF file (missing %PDF- header).",
+        errorMessage: "Conversion failed. Please try again.",
+        internalError: "Output did not have a valid %PDF- header.",
         errorKind: "unknown",
       };
     }
@@ -433,13 +438,16 @@ export async function convertDocxToPdf(
     };
   } catch (err: unknown) {
     onProgress("failed");
-    const e = err as Error & { kind?: ConversionResult["errorKind"] };
+    const e = err as Error & { kind?: ConversionResult["errorKind"]; internalError?: string };
     const kind = e.kind ?? "unknown";
-    let message = e.message || "Unknown conversion error.";
-    // Map "cancelled" pseudo-kind to the user-visible "unknown" kind with a
-    // friendly message.
+    // User-facing message is always friendly — never mentions install / soffice / PATH.
+    let message = e.message || "Conversion failed. Please try again.";
+    const internalError = e.internalError;
     if (kind === ("cancelled" as any)) {
       message = "Conversion was cancelled.";
+    }
+    if (kind === "timeout") {
+      message = "Conversion is taking too long. Please try a smaller file or try again later.";
     }
     return {
       ok: false,
@@ -449,6 +457,7 @@ export async function convertDocxToPdf(
       outputSize: 0,
       pages: null,
       errorMessage: message,
+      internalError,
       errorKind: kind === ("cancelled" as any) ? "unknown" : kind,
     };
   } finally {

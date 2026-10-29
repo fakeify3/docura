@@ -3,12 +3,16 @@
  *
  * Body: multipart/form-data with field `file` (DOCX) and optional `settings` JSON.
  * Returns: the PDF as a binary download with metadata headers.
+ *
+ * The user-facing error message is always friendly — never mentions
+ * LibreOffice, soffice, installation, or PATH. The technical detail
+ * (`internalError`) is logged server-side only for debugging.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { convertDocxToPdf } from "@/lib/conversion-engine";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 180;
 
 export async function POST(req: NextRequest) {
   const form = await req.formData();
@@ -25,6 +29,13 @@ export async function POST(req: NextRequest) {
   const res = await convertDocxToPdf(buffer, file.name);
 
   if (!res.ok || !res.outputBuffer) {
+    // Log the technical detail server-side so we can debug, but only return
+    // the friendly errorMessage to the client.
+    if (res.internalError) {
+      console.error(
+        `[docura] conversion failed for ${file.name} (${buffer.length}B): ${res.internalError} [kind=${res.errorKind}]`
+      );
+    }
     return NextResponse.json(
       {
         ok: false,
