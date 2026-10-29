@@ -115,7 +115,10 @@ export interface ConversionResult {
   inputSize: number;
   outputSize: number;
   pages: number | null;
+  /** User-facing error message — friendly, never mentions installation or technical details. */
   errorMessage?: string;
+  /** Internal technical detail for server logs only — never shown to the user. */
+  internalError?: string;
   errorKind?:
     | "invalid_format"
     | "corrupted"
