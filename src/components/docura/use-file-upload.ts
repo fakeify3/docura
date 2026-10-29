@@ -117,11 +117,14 @@ export function useFileUpload() {
 /* Conversion helper — wraps the /api/convert call                    */
 /* ------------------------------------------------------------------ */
 
-export async function convertFile(
-  file: File,
-  onStage: (stage: UploadFile["status"], progress: number) => void,
-  signal?: AbortSignal
-): Promise<{
+/* ------------------------------------------------------------------ */
+/* Conversion helper — wraps the /api/convert call                    */
+/* The server already retries up to DOCURA_RETRIES times internally   */
+/* for transient failures, but we also retry once on the client side  */
+/* to recover from network blips / cold-start races.                  */
+/* ------------------------------------------------------------------ */
+
+interface ConvertResult {
   ok: boolean;
   output?: Blob;
   outputName?: string;
@@ -130,7 +133,13 @@ export async function convertFile(
   pages?: number | null;
   errorMessage?: string;
   errorKind?: string;
-}> {
+}
+
+async function convertFileOnce(
+  file: File,
+  onStage: (stage: UploadFile["status"], progress: number) => void,
+  signal?: AbortSignal
+): Promise<ConvertResult> {
   onStage("validating", 5);
   const fd = new FormData();
   fd.append("file", file);
@@ -147,7 +156,7 @@ export async function convertFile(
       try { body = await res.json(); } catch {}
       return {
         ok: false,
-        errorMessage: body?.error || `Conversion failed (HTTP ${res.status}).`,
+        errorMessage: body?.error || "Conversion failed. Please try again.",
         errorKind: body?.kind || "unknown",
       };
     }
@@ -162,7 +171,7 @@ export async function convertFile(
     if (!blob || blob.size === 0 || blob.type !== "application/pdf") {
       return {
         ok: false,
-        errorMessage: "Server returned an empty or non-PDF response.",
+        errorMessage: "Conversion failed. Please try again.",
         errorKind: "unknown",
       };
     }
@@ -176,10 +185,23 @@ export async function convertFile(
     }
     return {
       ok: false,
-      errorMessage: e.message || "Network error during conversion.",
+      errorMessage: "Conversion failed. Please try again.",
       errorKind: "network",
     };
   }
+}
+
+/**
+ * Public wrapper — calls the convert API once. The server already retries
+ * transient failures internally (DOCURA_RETRIES=2). We don't double-retry
+ * on the client to keep the user experience fast.
+ */
+export async function convertFile(
+  file: File,
+  onStage: (stage: UploadFile["status"], progress: number) => void,
+  signal?: AbortSignal
+): Promise<ConvertResult> {
+  return convertFileOnce(file, onStage, signal);
 }
 
 /* ------------------------------------------------------------------ */

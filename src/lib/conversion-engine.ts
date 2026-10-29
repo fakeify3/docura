@@ -135,8 +135,19 @@ const MAX_FILE_BYTES = parseInt(
   10
 );
 
+// 5 minutes — generous timeout for complex documents with many images,
+// tables, embedded objects, etc.
 const CONVERSION_TIMEOUT_MS = parseInt(
-  process.env.DOCURA_TIMEOUT_MS || String(180_000),
+  process.env.DOCURA_TIMEOUT_MS || String(300_000),
+  10
+);
+
+// How many times to retry a failed conversion with a fresh temp directory
+// and profile before giving up. Some DOCX files fail on the first attempt
+// due to transient LibreOffice state (stale lock files, profile corruption)
+// but succeed on retry.
+const CONVERSION_RETRIES = parseInt(
+  process.env.DOCURA_RETRIES || String(2),
   10
 );
 
@@ -227,11 +238,182 @@ export function inspectPdf(buffer: Buffer): PdfInfo {
 /* ------------------------------------------------------------------ */
 
 /**
- * Convert a DOCX buffer to a real PDF buffer using LibreOffice headless.
+ * Clean up any stale LibreOffice lock files in a directory.
+ * LibreOffice creates `.~lock.<filename>#` files next to the document
+ * being converted. If a previous conversion crashed, these can persist
+ * and cause the next attempt to fail.
+ */
+async function cleanupStaleLocks(dir: string): Promise<void> {
+  try {
+    const entries = await fs.readdir(dir);
+    for (const entry of entries) {
+      if (entry.startsWith(".~lock.") || entry.endsWith(".lock")) {
+        try { await fs.unlink(join(dir, entry)); } catch {}
+      }
+    }
+  } catch {
+    // ignore — dir might not exist yet
+  }
+}
+
+/**
+ * A single conversion attempt. Returns the result; throws on internal
+ * error so the retry loop can catch it.
  *
  * The buffer is written to a unique temp directory, soffice is invoked with
  * an isolated user profile, the resulting PDF is read back, validated, and
  * the temp directory is removed.
+ */
+async function attemptConversion(
+  inputBuffer: Buffer,
+  safeName: string,
+  sofficeBin: string,
+  opts?: { signal?: AbortSignal }
+): Promise<ConversionResult> {
+  const start = Date.now();
+  const workDir = makeUniqueTempDir();
+  const profileDir = makeUniqueTempDir();
+  const inputPath = join(workDir, safeName);
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    await fs.mkdir(profileDir, { recursive: true });
+    await fs.writeFile(inputPath, inputBuffer);
+
+    await new Promise<void>((resolveP, rejectP) => {
+      const args = [
+        "--headless",
+        "--norestore",
+        "--nolockcheck",
+        "--nodefault",
+        "--nofirststartwizard",
+        `-env:UserInstallation=file://${profileDir}`,
+        "--convert-to",
+        "pdf:writer_pdf_Export",
+        "--outdir",
+        workDir,
+        inputPath,
+      ];
+      const child = spawn(sofficeBin, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          HOME: profileDir,
+          USERPROFILE: profileDir,
+        },
+      });
+
+      let stderr = "";
+      let stdout = "";
+      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+        rejectP(Object.assign(new Error("Conversion timed out."), { kind: "timeout" }));
+      }, CONVERSION_TIMEOUT_MS);
+
+      const onAbort = () => {
+        try { child.kill("SIGKILL"); } catch {}
+        rejectP(Object.assign(new Error("Conversion cancelled."), { kind: "cancelled" as any }));
+      };
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          rejectP(Object.assign(
+            new Error("Conversion failed. Please try again."),
+            { kind: "engine_unavailable", internalError: `ENOENT spawning soffice at ${sofficeBin}: ${err.message}` }
+          ));
+        } else {
+          rejectP(Object.assign(
+            new Error("Conversion failed. Please try again."),
+            { kind: "engine_unavailable", internalError: `Failed to launch soffice: ${err.message}` }
+          ));
+        }
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        if (code === 0) {
+          resolveP();
+        } else {
+          if (/encrypted|password/i.test(stderr)) {
+            rejectP(Object.assign(new Error("This document is password-protected. Please remove the password and try again."), { kind: "encrypted" }));
+          } else if (/no such file|not found/i.test(stderr)) {
+            rejectP(Object.assign(new Error("Conversion failed. Please try again."), { kind: "engine_unavailable", internalError: `soffice stderr: ${stderr.slice(0, 300)}` }));
+          } else if (/disk|space|enospc/i.test(stderr)) {
+            rejectP(Object.assign(new Error("Conversion failed due to insufficient server space. Please try again later."), { kind: "disk_full" }));
+          } else {
+            rejectP(Object.assign(
+              new Error("Conversion failed. Please try again."),
+              { kind: "unknown", internalError: `exit ${code}: ${(stderr || stdout).slice(0, 300)}` }
+            ));
+          }
+        }
+      });
+    });
+
+    const outName = safeName.replace(/\.docx$/i, ".pdf");
+    const outPath = join(workDir, outName);
+    let outBuffer: Buffer;
+    try {
+      outBuffer = await fs.readFile(outPath);
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code === "ENOENT") {
+        return {
+          ok: false,
+          outputName: outName,
+          durationMs: Date.now() - start,
+          inputSize: inputBuffer.length,
+          outputSize: 0,
+          pages: null,
+          errorMessage: "Conversion failed. Please try again.",
+          internalError: `Output PDF not produced at ${outPath}`,
+          errorKind: "corrupted",
+        };
+      }
+      throw err;
+    }
+    const info = inspectPdf(outBuffer);
+    if (!info.valid) {
+      return {
+        ok: false,
+        outputName: outName,
+        durationMs: Date.now() - start,
+        inputSize: inputBuffer.length,
+        outputSize: outBuffer.length,
+        pages: null,
+        errorMessage: "Conversion failed. Please try again.",
+        internalError: "Output did not have a valid %PDF- header.",
+        errorKind: "unknown",
+      };
+    }
+
+    return {
+      ok: true,
+      outputBuffer: outBuffer,
+      outputName: outName,
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: outBuffer.length,
+      pages: info.pages,
+    };
+  } finally {
+    try { await cleanupStaleLocks(workDir); } catch {}
+    try { await fs.rm(workDir, { recursive: true, force: true }); } catch {}
+    try { await fs.rm(profileDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+/**
+ * Convert a DOCX buffer to a real PDF buffer using LibreOffice headless.
+ * Retries up to CONVERSION_RETRIES times on transient failures — each retry
+ * uses a fresh temp directory and a fresh user profile to avoid stale state.
  */
 export async function convertDocxToPdf(
   inputBuffer: Buffer,
@@ -272,9 +454,6 @@ export async function convertDocxToPdf(
     };
   }
 
-  // Resolve the engine binary first — fail with a FRIENDLY message if missing.
-  // The technical detail goes into `internalError` for server logs only;
-  // the user never sees "install LibreOffice" language.
   const sofficeBin = await resolveSofficeBin();
   if (!sofficeBin) {
     onProgress("failed");
@@ -292,179 +471,70 @@ export async function convertDocxToPdf(
   }
 
   const safeName = sanitizeFilename(inputName);
-  const workDir = makeUniqueTempDir();
-  const profileDir = makeUniqueTempDir();
-  const inputPath = join(workDir, safeName);
 
-  try {
-    onProgress("preparing");
-    await fs.mkdir(workDir, { recursive: true });
-    await fs.mkdir(profileDir, { recursive: true });
-    await fs.writeFile(inputPath, inputBuffer);
-
-    onProgress("converting");
-    // Run LibreOffice headless. The -env:UserInstallation flag isolates the
-    // profile to prevent collisions between concurrent conversions.
-    await new Promise<void>((resolveP, rejectP) => {
-      const args = [
-        "--headless",
-        "--norestore",
-        "--nolockcheck",
-        "--nodefault",
-        "--nofirststartwizard",
-        `-env:UserInstallation=file://${profileDir}`,
-        "--convert-to",
-        "pdf:writer_pdf_Export",
-        "--outdir",
-        workDir,
-        inputPath,
-      ];
-      const child = spawn(sofficeBin, args, {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          // soffice needs a writable HOME for its profile, even with the
-          // -env:UserInstallation override. Use the temp profile dir.
-          HOME: profileDir,
-          // On Linux/macOS, also set USERPROFILE for cross-platform safety.
-          USERPROFILE: profileDir,
-        },
-      });
-
-      let stderr = "";
-      let stdout = "";
-      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-
-      const timer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch {}
-        rejectP(Object.assign(new Error("Conversion timed out."), { kind: "timeout" }));
-      }, CONVERSION_TIMEOUT_MS);
-
-      const onAbort = () => {
-        try { child.kill("SIGKILL"); } catch {}
-        rejectP(Object.assign(new Error("Conversion cancelled."), { kind: "cancelled" as any }));
-      };
-      opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        opts?.signal?.removeEventListener("abort", onAbort);
-        // ENOENT means the binary itself wasn't found — user sees a friendly
-        // message; the technical detail goes into internalError for logs.
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          rejectP(Object.assign(
-            new Error("Conversion failed. Please try again."),
-            { kind: "engine_unavailable", internalError: `ENOENT spawning soffice at ${sofficeBin}: ${err.message}` }
-          ));
-        } else {
-          rejectP(Object.assign(
-            new Error("Conversion failed. Please try again."),
-            { kind: "engine_unavailable", internalError: `Failed to launch soffice: ${err.message}` }
-          ));
-        }
-      });
-
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        opts?.signal?.removeEventListener("abort", onAbort);
-        if (code === 0) {
-          resolveP();
-        } else {
-          // Detect encrypted doc
-          if (/encrypted|password/i.test(stderr)) {
-            rejectP(Object.assign(new Error("This document is password-protected. Please remove the password and try again."), { kind: "encrypted" }));
-          } else if (/no such file|not found/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Conversion failed. Please try again."), { kind: "engine_unavailable", internalError: `soffice stderr: ${stderr.slice(0, 300)}` }));
-          } else if (/disk|space|enospc/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Conversion failed due to insufficient server space. Please try again later."), { kind: "disk_full" }));
-          } else {
-            rejectP(Object.assign(
-              new Error("Conversion failed. Please try again."),
-              { kind: "unknown", internalError: `exit ${code}: ${(stderr || stdout).slice(0, 300)}` }
-            ));
-          }
-        }
-      });
-    });
-
-    onProgress("verifying");
-    const outName = safeName.replace(/\.docx$/i, ".pdf");
-    const outPath = join(workDir, outName);
-    let outBuffer: Buffer;
+  // Retry loop — fresh temp dir + fresh profile per attempt.
+  let lastError: ConversionResult | null = null;
+  for (let attempt = 1; attempt <= CONVERSION_RETRIES; attempt++) {
+    onProgress(attempt === 1 ? "preparing" : "converting");
     try {
-      outBuffer = await fs.readFile(outPath);
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException;
-      if (err.code === "ENOENT") {
-        return {
-          ok: false,
-          outputName: outName,
-          durationMs: Date.now() - start,
-          inputSize: inputBuffer.length,
-          outputSize: 0,
-          pages: null,
-          errorMessage: "Conversion failed. Please try again.",
-          internalError: `Output PDF not produced at ${outPath}`,
-          errorKind: "corrupted",
-        };
+      const result = await attemptConversion(inputBuffer, safeName, sofficeBin, { signal: opts?.signal });
+      if (result.ok) {
+        onProgress("done");
+        return result;
       }
-      throw err;
-    }
-    const info = inspectPdf(outBuffer);
-    if (!info.valid) {
-      return {
+      // Don't retry on permanent errors — only retry on potentially-transient ones.
+      const permanentKinds = ["invalid_format", "encrypted", "oversized"];
+      if (permanentKinds.includes(result.errorKind || "")) {
+        return result;
+      }
+      lastError = result;
+      // Brief pause before retry to let any stale LibreOffice state clear.
+      if (attempt < CONVERSION_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (err) {
+      const e = err as Error & { kind?: ConversionResult["errorKind"]; internalError?: string };
+      const kind = e.kind ?? "unknown";
+      let message = e.message || "Conversion failed. Please try again.";
+      const internalError = e.internalError;
+      if (kind === ("cancelled" as any)) {
+        message = "Conversion was cancelled.";
+      }
+      if (kind === "timeout") {
+        message = "Conversion is taking too long. Please try a smaller file or try again later.";
+      }
+      lastError = {
         ok: false,
-        outputName: outName,
+        outputName: "",
         durationMs: Date.now() - start,
         inputSize: inputBuffer.length,
-        outputSize: outBuffer.length,
+        outputSize: 0,
         pages: null,
-        errorMessage: "Conversion failed. Please try again.",
-        internalError: "Output did not have a valid %PDF- header.",
-        errorKind: "unknown",
+        errorMessage: message,
+        internalError: internalError ? `[attempt ${attempt}] ${internalError}` : undefined,
+        errorKind: kind === ("cancelled" as any) ? "unknown" : kind,
       };
+      // Don't retry on timeout or permanent errors
+      if (kind === "timeout" || kind === "encrypted" || kind === "invalid_format" || kind === "oversized") {
+        break;
+      }
+      if (attempt < CONVERSION_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
     }
-
-    onProgress("done");
-    return {
-      ok: true,
-      outputBuffer: outBuffer,
-      outputName: outName,
-      durationMs: Date.now() - start,
-      inputSize: inputBuffer.length,
-      outputSize: outBuffer.length,
-      pages: info.pages,
-    };
-  } catch (err: unknown) {
-    onProgress("failed");
-    const e = err as Error & { kind?: ConversionResult["errorKind"]; internalError?: string };
-    const kind = e.kind ?? "unknown";
-    // User-facing message is always friendly — never mentions install / soffice / PATH.
-    let message = e.message || "Conversion failed. Please try again.";
-    const internalError = e.internalError;
-    if (kind === ("cancelled" as any)) {
-      message = "Conversion was cancelled.";
-    }
-    if (kind === "timeout") {
-      message = "Conversion is taking too long. Please try a smaller file or try again later.";
-    }
-    return {
-      ok: false,
-      outputName: "",
-      durationMs: Date.now() - start,
-      inputSize: inputBuffer.length,
-      outputSize: 0,
-      pages: null,
-      errorMessage: message,
-      internalError,
-      errorKind: kind === ("cancelled" as any) ? "unknown" : kind,
-    };
-  } finally {
-    // always clean up — best-effort, never throw on failure
-    try { await fs.rm(workDir, { recursive: true, force: true }); } catch {}
-    try { await fs.rm(profileDir, { recursive: true, force: true }); } catch {}
   }
+
+  onProgress("failed");
+  return lastError ?? {
+    ok: false,
+    outputName: "",
+    durationMs: Date.now() - start,
+    inputSize: inputBuffer.length,
+    outputSize: 0,
+    pages: null,
+    errorMessage: "Conversion failed. Please try again.",
+    errorKind: "unknown",
+  };
 }
 
 /* ------------------------------------------------------------------ */
