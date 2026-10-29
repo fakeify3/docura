@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 interface EngineStatus {
   available: boolean;
   version: string | null;
+  path: string | null;
   engineName: string;
 }
 
@@ -31,7 +32,7 @@ export function EngineBadge() {
       })
       .catch(() => {
         if (!cancelled) {
-          setStatus({ available: false, version: null, engineName: "LibreOffice" });
+          setStatus({ available: false, version: null, path: null, engineName: "LibreOffice" });
           setLoading(false);
         }
       });
@@ -52,8 +53,8 @@ export function EngineBadge() {
         loading
           ? "Checking conversion engine…"
           : status?.available
-            ? `${status.engineName} ${status.version ?? ""} is available.`
-            : "Conversion engine unavailable. Conversions will fail until LibreOffice is installed."
+            ? `${status.engineName} ${status.version ?? ""}\nResolved path: ${status.path ?? "(unknown)"}`
+            : "Conversion engine unavailable. Conversions will fail until LibreOffice is installed and soffice is on the PATH."
       }
     >
       {loading ? (

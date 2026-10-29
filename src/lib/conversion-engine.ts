@@ -13,16 +13,99 @@
  *  - Temp directories are cleaned up after each conversion
  *  - LibreOffice runs with an isolated -env:UserInstallation profile to avoid
  *    collisions and to prevent leakage between concurrent conversions
+ *
+ * Engine discovery:
+ *  - Tries multiple well-known soffice paths in order: SOFFICE_BIN env var,
+ *    `soffice`, `libreoffice`, /usr/bin/soffice, /usr/bin/libreoffice,
+ *    /usr/lib/libreoffice/program/soffice, /opt/libreoffice/program/soffice
+ *  - Caches the resolved binary so subsequent conversions skip the discovery
  */
 
 import { randomUUID } from "crypto";
-import { promises as fs } from "fs";
-import { spawn } from "child_process";
+import { promises as fs, constants as fsConstants } from "fs";
+import { spawn, spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { join, basename, extname, resolve } from "path";
+import { join, basename, extname } from "path";
 
-const SOFFICE_BIN =
-  process.env.SOFFICE_BIN || "soffice";
+/* ------------------------------------------------------------------ */
+/* Engine binary discovery                                            */
+/* ------------------------------------------------------------------ */
+
+const CANDIDATE_BINARIES = [
+  process.env.SOFFICE_BIN,
+  "soffice",
+  "libreoffice",
+  "/usr/bin/soffice",
+  "/usr/bin/libreoffice",
+  "/usr/lib/libreoffice/program/soffice",
+  "/opt/libreoffice/program/soffice",
+  "/usr/local/bin/soffice",
+  "/usr/local/bin/libreoffice",
+  // macOS LibreOffice.app
+  "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+  // Windows common install paths
+  "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+  "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+].filter(Boolean) as string[];
+
+let resolvedBinary: string | null = null;
+let binaryCheckInProgress: Promise<string | null> | null = null;
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve which soffice binary to use. Tries PATH-resolved names first
+ * (via `which`-style spawn), then absolute paths. Result is cached.
+ */
+async function resolveSofficeBin(): Promise<string | null> {
+  if (resolvedBinary) return resolvedBinary;
+  if (binaryCheckInProgress) return binaryCheckInProgress;
+
+  binaryCheckInProgress = (async () => {
+    for (const candidate of CANDIDATE_BINARIES) {
+      // If it's an absolute path, just check it's executable.
+      if (candidate.includes("/") || candidate.includes("\\")) {
+        if (await fileExists(candidate)) {
+          resolvedBinary = candidate;
+          return candidate;
+        }
+        continue;
+      }
+      // PATH-resolved: try spawning the binary directly with --version.
+      // No shell option to avoid the Node.js deprecation warning about
+      // passing args with shell:true.
+      try {
+        const probe = spawnSync(candidate, ["--version"], {
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        if (probe.status === 0) {
+          resolvedBinary = candidate;
+          return candidate;
+        }
+        // If spawnSync failed (ENOENT), the binary isn't on PATH; fall through.
+      } catch {
+        // ignore, try next candidate
+      }
+    }
+    return null;
+  })();
+
+  const result = await binaryCheckInProgress;
+  binaryCheckInProgress = null;
+  return result;
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                         */
+/* ------------------------------------------------------------------ */
 
 export interface ConversionResult {
   ok: boolean;
@@ -50,7 +133,7 @@ const MAX_FILE_BYTES = parseInt(
 );
 
 const CONVERSION_TIMEOUT_MS = parseInt(
-  process.env.DOCURA_TIMEOUT_MS || String(120_000),
+  process.env.DOCURA_TIMEOUT_MS || String(180_000),
   10
 );
 
@@ -186,6 +269,23 @@ export async function convertDocxToPdf(
     };
   }
 
+  // Resolve the engine binary first — fail fast with a clear message if missing
+  const sofficeBin = await resolveSofficeBin();
+  if (!sofficeBin) {
+    onProgress("failed");
+    return {
+      ok: false,
+      outputName: "",
+      durationMs: Date.now() - start,
+      inputSize: inputBuffer.length,
+      outputSize: 0,
+      pages: null,
+      errorMessage:
+        "Conversion engine unavailable. LibreOffice (soffice) was not found on the PATH or in any of the well-known install locations. Install LibreOffice 25.x or set SOFFICE_BIN to point at the soffice executable.",
+      errorKind: "engine_unavailable",
+    };
+  }
+
   const safeName = sanitizeFilename(inputName);
   const workDir = makeUniqueTempDir();
   const profileDir = makeUniqueTempDir();
@@ -214,46 +314,69 @@ export async function convertDocxToPdf(
         workDir,
         inputPath,
       ];
-      const child = spawn(SOFFICE_BIN, args, {
+      const child = spawn(sofficeBin, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: profileDir },
+        env: {
+          ...process.env,
+          // soffice needs a writable HOME for its profile, even with the
+          // -env:UserInstallation override. Use the temp profile dir.
+          HOME: profileDir,
+          // On Linux/macOS, also set USERPROFILE for cross-platform safety.
+          USERPROFILE: profileDir,
+        },
       });
 
       let stderr = "";
-      child.stdout?.on("data", () => {});
-      child.stderr?.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
+      let stdout = "";
+      child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 
       const timer = setTimeout(() => {
         try { child.kill("SIGKILL"); } catch {}
-        rejectP(new Error("Conversion timed out."));
+        rejectP(Object.assign(new Error("Conversion timed out."), { kind: "timeout" }));
       }, CONVERSION_TIMEOUT_MS);
 
       const onAbort = () => {
         try { child.kill("SIGKILL"); } catch {}
-        rejectP(new Error("Conversion cancelled."));
+        rejectP(Object.assign(new Error("Conversion cancelled."), { kind: "cancelled" as any }));
       };
       opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
       child.on("error", (err) => {
         clearTimeout(timer);
-        // engine missing
-        rejectP(Object.assign(new Error(`LibreOffice engine unavailable: ${err.message}`), { kind: "engine_unavailable" }));
+        opts?.signal?.removeEventListener("abort", onAbort);
+        // ENOENT means the binary itself wasn't found
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          rejectP(Object.assign(
+            new Error(`LibreOffice engine not found at "${sofficeBin}". Install LibreOffice and ensure soffice is on the PATH, or set SOFFICE_BIN.`),
+            { kind: "engine_unavailable" }
+          ));
+        } else {
+          rejectP(Object.assign(
+            new Error(`Failed to launch LibreOffice: ${err.message}`),
+            { kind: "engine_unavailable" }
+          ));
+        }
       });
 
       child.on("close", (code) => {
         clearTimeout(timer);
         opts?.signal?.removeEventListener("abort", onAbort);
-        if (code === 0) resolveP();
-        else {
+        if (code === 0) {
+          resolveP();
+        } else {
           // Detect encrypted doc
           if (/encrypted|password/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Document is encrypted or password-protected."), { kind: "encrypted" }));
+            rejectP(Object.assign(new Error("Document is encrypted or password-protected. Remove the password in Word first, then re-upload."), { kind: "encrypted" }));
           } else if (/no such file|not found/i.test(stderr)) {
-            rejectP(Object.assign(new Error("Conversion engine not installed."), { kind: "engine_unavailable" }));
+            rejectP(Object.assign(new Error("Conversion engine not found. Install LibreOffice and ensure soffice is on the PATH."), { kind: "engine_unavailable" }));
+          } else if (/disk|space|enospc/i.test(stderr)) {
+            rejectP(Object.assign(new Error("Insufficient disk space for conversion. Free up space and try again."), { kind: "disk_full" }));
           } else {
-            rejectP(Object.assign(new Error(`Conversion failed (exit ${code}): ${stderr.slice(0, 400)}`), { kind: "unknown" }));
+            rejectP(Object.assign(
+              new Error(`Conversion failed (exit ${code}). ${stderr.slice(0, 300) || stdout.slice(0, 300)}`.trim()),
+              { kind: "unknown" }
+            ));
           }
         }
       });
@@ -262,7 +385,25 @@ export async function convertDocxToPdf(
     onProgress("verifying");
     const outName = safeName.replace(/\.docx$/i, ".pdf");
     const outPath = join(workDir, outName);
-    const outBuffer = await fs.readFile(outPath);
+    let outBuffer: Buffer;
+    try {
+      outBuffer = await fs.readFile(outPath);
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code === "ENOENT") {
+        return {
+          ok: false,
+          outputName: outName,
+          durationMs: Date.now() - start,
+          inputSize: inputBuffer.length,
+          outputSize: 0,
+          pages: null,
+          errorMessage: "Conversion produced no output PDF. The source document may be corrupted or unsupported.",
+          errorKind: "corrupted",
+        };
+      }
+      throw err;
+    }
     const info = inspectPdf(outBuffer);
     if (!info.valid) {
       return {
@@ -272,7 +413,7 @@ export async function convertDocxToPdf(
         inputSize: inputBuffer.length,
         outputSize: outBuffer.length,
         pages: null,
-        errorMessage: "Conversion produced an invalid PDF file.",
+        errorMessage: "Conversion produced an invalid PDF file (missing %PDF- header).",
         errorKind: "unknown",
       };
     }
@@ -291,6 +432,12 @@ export async function convertDocxToPdf(
     onProgress("failed");
     const e = err as Error & { kind?: ConversionResult["errorKind"] };
     const kind = e.kind ?? "unknown";
+    let message = e.message || "Unknown conversion error.";
+    // Map "cancelled" pseudo-kind to the user-visible "unknown" kind with a
+    // friendly message.
+    if (kind === ("cancelled" as any)) {
+      message = "Conversion was cancelled.";
+    }
     return {
       ok: false,
       outputName: "",
@@ -298,11 +445,11 @@ export async function convertDocxToPdf(
       inputSize: inputBuffer.length,
       outputSize: 0,
       pages: null,
-      errorMessage: e.message || "Unknown conversion error.",
-      errorKind: kind,
+      errorMessage: message,
+      errorKind: kind === ("cancelled" as any) ? "unknown" : kind,
     };
   } finally {
-    // always clean up
+    // always clean up — best-effort, never throw on failure
     try { await fs.rm(workDir, { recursive: true, force: true }); } catch {}
     try { await fs.rm(profileDir, { recursive: true, force: true }); } catch {}
   }
@@ -312,17 +459,25 @@ export async function convertDocxToPdf(
 /* Health check                                                       */
 /* ------------------------------------------------------------------ */
 
-let cachedEngineStatus: { available: boolean; version: string | null; checkedAt: number } | null = null;
+let cachedEngineStatus: { available: boolean; version: string | null; path: string | null; checkedAt: number } | null = null;
 const ENGINE_CHECK_TTL = 30_000;
 
-export async function checkEngine(): Promise<{ available: boolean; version: string | null }> {
+export async function checkEngine(): Promise<{ available: boolean; version: string | null; path: string | null }> {
   const now = Date.now();
   if (cachedEngineStatus && now - cachedEngineStatus.checkedAt < ENGINE_CHECK_TTL) {
-    return { available: cachedEngineStatus.available, version: cachedEngineStatus.version };
+    return { available: cachedEngineStatus.available, version: cachedEngineStatus.version, path: cachedEngineStatus.path };
+  }
+  const bin = await resolveSofficeBin();
+  if (!bin) {
+    cachedEngineStatus = { available: false, version: null, path: null, checkedAt: now };
+    return { available: false, version: null, path: null };
   }
   try {
     const version = await new Promise<string>((resolveP, rejectP) => {
-      const child = spawn(SOFFICE_BIN, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(bin, ["--version"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env },
+      });
       let out = "";
       child.stdout?.on("data", (c: Buffer) => (out += c.toString()));
       child.on("error", rejectP);
@@ -331,10 +486,10 @@ export async function checkEngine(): Promise<{ available: boolean; version: stri
         else rejectP(new Error(`exit ${code}`));
       });
     });
-    cachedEngineStatus = { available: true, version, checkedAt: now };
-    return { available: true, version };
+    cachedEngineStatus = { available: true, version, path: bin, checkedAt: now };
+    return { available: true, version, path: bin };
   } catch {
-    cachedEngineStatus = { available: false, version: null, checkedAt: now };
-    return { available: false, version: null };
+    cachedEngineStatus = { available: false, version: null, path: bin, checkedAt: now };
+    return { available: false, version: null, path: bin };
   }
 }

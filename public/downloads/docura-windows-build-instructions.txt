@@ -56,6 +56,27 @@ profile alongside the executable. Configure `tauri.conf.json` -> `bundle`
 
 Then point DOCURA's conversion wrapper at the bundled soffice path.
 
+Engine path discovery (built-in)
+--------------------------------
+DOCURA's conversion wrapper resolves the soffice binary in this order:
+
+  1. DOCURA_SOFFICE_BIN env var (absolute path)
+  2. Bundled portable runtime at resources/portable-soffice/soffice(.exe)
+  3. Common system install paths:
+       Windows:  C:\Program Files\LibreOffice\program\soffice.exe
+                  C:\Program Files (x86)\LibreOffice\program\soffice.exe
+       macOS:    /Applications/LibreOffice.app/Contents/MacOS/soffice
+                  /opt/homebrew/bin/soffice
+       Linux:    /usr/bin/soffice
+                  /usr/bin/libreoffice
+                  /usr/lib/libreoffice/program/soffice
+                  /usr/local/bin/soffice
+                  /opt/libreoffice/program/soffice
+  4. PATH-resolved name (soffice / soffice.exe)
+
+If none of these resolve, conversions fail with a clear
+"engine unavailable" error and the header badge shows "Engine unavailable".
+
 Limitations
 -----------
 - This source package does NOT include a pre-built installer. You must run
@@ -70,3 +91,4 @@ After building:
   2. Convert a real DOCX file (e.g. /tests/sample.docx).
   3. Confirm the resulting PDF opens in Adobe Acrobat / SumatraPDF.
   4. Confirm a corrupted DOCX produces a clear error, not a fake PDF.
+  5. Confirm an encrypted DOCX produces a clear error.

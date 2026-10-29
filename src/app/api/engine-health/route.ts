@@ -15,6 +15,7 @@ export async function GET() {
   return NextResponse.json({
     available: status.available,
     version: status.version,
+    path: status.path,
     engineName: "LibreOffice (headless)",
   });
 }
