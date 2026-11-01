@@ -9,6 +9,9 @@ export interface UploadFile {
   progress: number;
   errorMessage?: string;
   errorKind?: string;
+  /** Technical detail captured from the server response — shown only when
+   * the user clicks "Show details" in the UI. */
+  errorDetail?: string;
   output?: Blob;
   outputName?: string;
   outputSize?: number;
@@ -133,6 +136,10 @@ interface ConvertResult {
   pages?: number | null;
   errorMessage?: string;
   errorKind?: string;
+  /** Technical detail returned by the server for debugging — shown only
+   * when the user clicks "Show details" in the UI. Never shown as the main
+   * error message. */
+  errorDetail?: string;
 }
 
 async function convertFileOnce(
@@ -152,12 +159,13 @@ async function convertFileOnce(
       signal,
     });
     if (!res.ok) {
-      let body: { error?: string; kind?: string } = {};
+      let body: { error?: string; kind?: string; detail?: string } = {};
       try { body = await res.json(); } catch {}
       return {
         ok: false,
         errorMessage: body?.error || "Conversion failed. Please try again.",
         errorKind: body?.kind || "unknown",
+        errorDetail: body?.detail,
       };
     }
     onStage("verifying", 90);
@@ -187,6 +195,7 @@ async function convertFileOnce(
       ok: false,
       errorMessage: "Conversion failed. Please try again.",
       errorKind: "network",
+      errorDetail: e.message,
     };
   }
 }

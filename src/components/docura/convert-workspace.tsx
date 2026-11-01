@@ -122,6 +122,7 @@ export function ConvertWorkspace() {
           progress: 0,
           errorMessage: result.errorMessage,
           errorKind: result.errorKind,
+          errorDetail: result.errorDetail,
           endedAt,
         });
         if (privacy.storeHistory) {
@@ -424,6 +425,22 @@ function FileCard({
   onDownload: () => void;
 }) {
   const isBusy = ["validating", "preparing", "converting", "verifying"].includes(file.status);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyDetails = () => {
+    if (!file.errorDetail) return;
+    const text = `DOCURA conversion error report
+File: ${file.file.name}
+Size: ${file.inputSize} bytes
+Kind: ${file.errorKind || "unknown"}
+Detail: ${file.errorDetail}
+
+Please share this text back so the conversion issue can be fixed.`;
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
   return (
     <div
       role="button"
@@ -471,8 +488,33 @@ function FileCard({
             </div>
           )}
           {file.status === "failed" && file.errorMessage && (
-            <div className="mt-2 text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded px-2 py-1.5 leading-snug">
-              {file.errorMessage}
+            <div className="mt-2">
+              <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded px-2 py-1.5 leading-snug">
+                {file.errorMessage}
+              </div>
+              {file.errorDetail && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setDetailsOpen(!detailsOpen); }}
+                    className="text-[10.5px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                  >
+                    {detailsOpen ? "Hide details" : "Show details"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); copyDetails(); }}
+                    className="text-[10.5px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                  >
+                    {copied ? "Copied ✓" : "Copy error report"}
+                  </button>
+                </div>
+              )}
+              {detailsOpen && file.errorDetail && (
+                <pre className="mt-1.5 text-[10px] font-mono bg-muted/60 border border-border rounded px-2 py-1.5 overflow-x-auto scroll-thin text-muted-foreground whitespace-pre-wrap break-all">
+                  {file.errorDetail}
+                </pre>
+              )}
             </div>
           )}
         </div>

@@ -74,7 +74,7 @@ export function BatchWorkspace() {
             });
           }
         } else {
-          upload.updateFile(f.id, { status: "failed", progress: 0, errorMessage: result.errorMessage, errorKind: result.errorKind, endedAt });
+          upload.updateFile(f.id, { status: "failed", progress: 0, errorMessage: result.errorMessage, errorKind: result.errorKind, errorDetail: result.errorDetail, endedAt });
           if (privacy.storeHistory) {
             addHistory({
               id: f.id, originalName: f.file.name,
@@ -146,7 +146,7 @@ export function BatchWorkspace() {
     if (result.ok && result.output) {
       upload.updateFile(file.id, { status: "success", progress: 100, output: result.output, outputName: result.outputName, outputSize: result.outputSize, durationMs, pages: result.pages, endedAt });
     } else {
-      upload.updateFile(file.id, { status: "failed", progress: 0, errorMessage: result.errorMessage, errorKind: result.errorKind, endedAt });
+      upload.updateFile(file.id, { status: "failed", progress: 0, errorMessage: result.errorMessage, errorKind: result.errorKind, errorDetail: result.errorDetail, endedAt });
     }
     setIsProcessing(false);
   }, [upload]);

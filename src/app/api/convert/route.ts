@@ -5,8 +5,10 @@
  * Returns: the PDF as a binary download with metadata headers.
  *
  * The user-facing error message is always friendly — never mentions
- * LibreOffice, soffice, installation, or PATH. The technical detail
- * (`internalError`) is logged server-side only for debugging.
+ * LibreOffice, soffice, installation, or PATH. The technical `detail`
+ * field is included in the JSON error response so the user can click
+ * "Show details" in the UI and copy/paste it back for debugging. The
+ * same detail is also logged server-side via console.error.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { convertDocxToPdf } from "@/lib/conversion-engine";
@@ -29,8 +31,7 @@ export async function POST(req: NextRequest) {
   const res = await convertDocxToPdf(buffer, file.name);
 
   if (!res.ok || !res.outputBuffer) {
-    // Log the technical detail server-side so we can debug, but only return
-    // the friendly errorMessage to the client.
+    // Log the technical detail server-side so we can debug.
     if (res.internalError) {
       console.error(
         `[docura] conversion failed for ${file.name} (${buffer.length}B): ${res.internalError} [kind=${res.errorKind}]`
@@ -40,6 +41,11 @@ export async function POST(req: NextRequest) {
       {
         ok: false,
         error: res.errorMessage,
+        // The `detail` field exposes the technical reason to the UI so the
+        // user can click "Show details" and copy/paste it back to us for
+        // debugging. It's intentionally NOT shown as the main message —
+        // the friendly `error` field is what the user sees by default.
+        detail: res.internalError || `(kind=${res.errorKind || "unknown"})`,
         kind: res.errorKind,
         durationMs: res.durationMs,
         inputSize: res.inputSize,
